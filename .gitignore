@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+*.pyz
+*.db*
+.env*
+*.pem
+*.key
+/.private/
+/deploy/config.*.json
+!/deploy/config.example.json

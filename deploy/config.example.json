@@ -1,0 +1,9 @@
+{
+  "state": "~/.local/state/spool",
+  "worker_root": "~/.local/state/spool-worker",
+  "source_roots": ["~/projects"],
+  "registry_port": 18747,
+  "hosts": {
+    "dispatcher": {"local": true, "placement": {"priority": 0}}
+  }
+}
