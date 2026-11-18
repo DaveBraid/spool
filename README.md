@@ -24,6 +24,8 @@ systemctl --user enable --now spool.service
 3. `spool submit job.json --id <唯一任务ID> --json` 冻结输入并排队。明确允许共享忙卡时，可用 `submit --force` 或 `force-start <ID>`。用 `status` 看阶段和真实错误，`logs` 查 stdout/stderr。`--json` 的 `ok` 表示命令成功，训练状态看 `data.state`。
 4. 容器的 `/outputs` 按相对路径回传到 `result_root`，保留训练配置、检查点和原生日志。省略 `result_root` 时使用独立任务归档。Spool 在记录 `SYNCED` 并保全终端日志后自动清理这次尝试的工作副本与停止的容器，保留任务索引和终端日志尾部。目标有同名文件时保留源文件并报告冲突。用 `collect <ID>` 重试回传，用 `cleanup <ID>` 重试清理。
 
+`logs` 优先读取调度主机已归档的日志。实时读取时，`NODE_TRANSPORT_FAILED_TIMEOUT` 表示节点执行尚未返回，`detail` 会带上等待时长及已收到的节点阶段。`INSPECT_FAILED_TIMEOUT` 和 `LOG_READ_FAILED_TIMEOUT` 分别表示节点检查容器和读取 Docker 日志超时。训练是否结束以 `status` 返回的执行记录为准。
+
 SwanLab 可选。在线训练复用 System 1 的 `~/.swanlab/.netrc`，训练镜像需有相应 SDK 且能访问云端。确认容器退出后，Spool 给云端仍显示运行的实验补报终态：人工停止为 `Ctrl+C`，异常退出为「中断」。云端状态和文件回传独立处理。
 
 ## 镜像维护

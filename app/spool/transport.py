@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 
-from .worker import RESULT_EXCLUDES, Fault, private_write, redact, run
+from .worker import COMMAND_TIMEOUT, RESULT_EXCLUDES, Fault, private_write, redact, run
 
 
 SSH = ["ssh", "-T", "-oBatchMode=yes", "-oStrictHostKeyChecking=yes", "-oUpdateHostKeys=no", "-oConnectTimeout=5",
@@ -29,14 +29,25 @@ class Transport:
         self.command = ["python3", "-I", "-B", "-c", script]
         self.tunnels = {}
 
-    def call(self, host, action, attempt=None, *, timeout=24, **data):
-        '''在指定节点执行一次 JSON 请求，保留远端错误阶段和进程输出。'''
+    def call(self, host, action, attempt=None, *, timeout=None, **data):
+        '''在指定节点执行一次 JSON 请求，保留远端错误阶段和进程输出。
+        日志请求需给容器检查和读取各留一段超时预算。
+        '''
         node = self.cfg["hosts"][host]
         payload = dict(action=action, root=node.get("root", self.cfg["worker_root"]), attempt=attempt, **data)
         args = [sys.executable, *self.command[1:]]
         if not node.get("local"):
             args = [*SSH, "-oClearAllForwardings=yes", node["ssh"], shlex.join(self.command)]
-        result = run(args, action, "NODE_TRANSPORT_FAILED", timeout=timeout, input_text=json.dumps(payload), transient=True)
+        if timeout is None:
+            # 容器检查与日志读取各 15 秒，余量用于连接和回包。
+            timeout = 2 * COMMAND_TIMEOUT + 10 if action == "logs" else 24
+        try:
+            result = run(args, action, "NODE_TRANSPORT_FAILED", timeout=timeout, input_text=json.dumps(payload), transient=True)
+        except Fault as exc:
+            if action == "logs":
+                channel = "本机" if node.get("local") else "SSH"
+                exc.info["detail"] = f"{channel} 节点 {host}\n{redact(exc.info['detail'], [])}".rstrip()
+            raise
         try:
             body = json.loads(result.stdout)
         except (ValueError, TypeError):

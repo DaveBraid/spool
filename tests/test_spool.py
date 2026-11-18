@@ -1,9 +1,12 @@
 """验证首次实现中会影响训练和凭据的状态边界。"""
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import redirect_stderr
+from io import StringIO
 import json
 import os
 from pathlib import Path
+from subprocess import TimeoutExpired
 from types import SimpleNamespace
 import tempfile
 import time
@@ -15,7 +18,7 @@ from spool.images import manifest_removals, retained_images
 from spool.service import Service, placement_error, select
 from spool.state import Store, normalize
 from spool.swanlab import sync_run, termination_state
-from spool.worker import Fault, cleanup_attempt, export_outputs, gpu_inventory, launch, status, swanlab_file, private_write, tree
+from spool.worker import COMMAND_TIMEOUT, Fault, cleanup_attempt, dispatch, export_outputs, gpu_inventory, launch, status, swanlab_file, private_write, tree
 
 
 def card(uuid, model="4090"):
@@ -108,6 +111,41 @@ class Spool(unittest.TestCase):
         self.assertFalse((frozen / ".env").exists())
         with self.assertRaises(Fault):
             self.store.enqueue("trial", self.spec(name="different"))
+
+    def test_live_log_timeout_reports_progress_and_preserves_training(self):
+        '''验证无节点回包和收到阶段后的超时，保留原尝试及训练状态。'''
+        self.cfg["worker_root"] = str(self.root / "worker")
+        job = self.claim("live-log")
+        self.service.mark(job["id"], state="RUNNING", stage="training", attempt=dict(host="remote", state="RUNNING"))
+        args = parser().parse_args(["logs", job["id"], "--tail", "180"])
+        before = self.store.get(job["id"])
+        phase = "节点已确认容器，正在读取 Docker 日志"
+        for output, expected in ((None, "未收到进程输出"), (phase.encode(), phase)):
+            with self.subTest(output=output):
+                timeout = TimeoutExpired(["ssh"], 40, stderr=output)
+                with patch("spool.worker.subprocess.run", side_effect=timeout) as ssh, self.assertRaises(Fault) as error:
+                    operate(args, self.cfg, self.store)
+                self.assertGreater(ssh.call_args.kwargs["timeout"], 2 * COMMAND_TIMEOUT)
+                self.assertEqual(error.exception.info["code"], "NODE_TRANSPORT_FAILED_TIMEOUT")
+                self.assertTrue(error.exception.info["transient"])
+                self.assertIn("SSH 节点 remote\n已等待 40 秒", error.exception.info["detail"])
+                self.assertIn(expected, error.exception.info["detail"])
+        self.assertEqual(self.store.get(job["id"]), before)
+
+    def test_docker_log_timeout_preserves_phase_and_redacts_partial_output(self):
+        '''确认节点已找到容器后，返回 Docker 自己的超时错误和脱敏输出。'''
+        root = self.root / "worker"
+        attempt = "a" * 32
+        dispatch(dict(action="init", root=str(root), attempt=attempt))
+        private_write(root / "runs" / attempt / "secrets/.netrc", "machine swanlab.cn login user password mock-secret\n")
+        timeout = TimeoutExpired(["docker", "logs"], COMMAND_TIMEOUT, stderr=b"partial training output mock-secret")
+        with patch("spool.worker.inspect", return_value={"status": "running"}), \
+             patch("spool.worker.subprocess.run", side_effect=timeout), \
+             redirect_stderr(StringIO()) as progress, self.assertRaises(Fault) as error:
+            dispatch(dict(action="logs", root=str(root), attempt=attempt, tail=180))
+        self.assertIn("正在读取 Docker 日志", progress.getvalue())
+        self.assertEqual(error.exception.info["code"], "LOG_READ_FAILED_TIMEOUT")
+        self.assertIn("partial training output [REDACTED]", error.exception.info["detail"])
 
     def test_pinned_cards_keep_identity_and_order_when_busy(self):
         '''精确放置不静默换卡，允许强制时仍维持 UUID 顺序。'''

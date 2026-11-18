@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 
 
 RESULT_EXCLUDES = (".cache", ".netrc", ".env*", ".ssh", "*.pem", "*.key", ".swanlab", ".spool", ".rsync-partial")
+COMMAND_TIMEOUT = 15
 
 
 class Fault(Exception):
@@ -31,8 +32,8 @@ class Fault(Exception):
                          transient=transient)
 
 
-def run(args, stage, code, *, timeout=15, input_text=None, check=True, transient=False):
-    '''运行参数数组并保留输出和退出码。
+def run(args, stage, code, *, timeout=COMMAND_TIMEOUT, input_text=None, check=True, transient=False):
+    '''运行参数数组并保留输出、退出码与实际超时预算。
     输入可经 stdin 传入凭据；诊断只收集进程输出。
     '''
     try:
@@ -40,8 +41,9 @@ def run(args, stage, code, *, timeout=15, input_text=None, check=True, transient
                                 errors="replace", timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         partial = b"\n".join(value for value in (exc.stderr, exc.stdout) if value)
-        raise Fault(stage, code + "_TIMEOUT", "操作超时", partial.decode(errors="replace")[-16000:],
-                    transient=True) from None
+        detail = f"已等待 {timeout:g} 秒"
+        detail += "\n" + partial.decode(errors="replace")[-15900:] if partial else "，未收到进程输出"
+        raise Fault(stage, code + "_TIMEOUT", "操作超时", detail, transient=True) from None
     except OSError as exc:
         raise Fault(stage, code, "无法执行命令", str(exc)) from None
     if check and result.returncode:
@@ -517,15 +519,22 @@ def dispatch(payload):
     if action == "cleanup":
         return cleanup_attempt(payload["attempt"], work, payload.get("archived_container"))
     if action == "logs":
-        if not inspect(payload["attempt"]):
-            raise Fault("logs", "CONTAINER_NOT_FOUND", "还没有可读取的容器日志")
-        result = run(["docker", "logs", "--tail", str(payload["tail"]), "spool-" + payload["attempt"]],
-                     "logs", "LOG_READ_FAILED", check=False)
-        # docker logs 把容器 stderr 保持在 stderr 通道。
         path = work / "secrets/.netrc"
         secrets = secret_values(path) if path.exists() else []
+        try:
+            # 阶段写入节点 stderr，连接超时仍能读取最后进展。
+            print("节点已收到日志请求，正在检查容器", file=sys.stderr, flush=True)
+            if not inspect(payload["attempt"]):
+                raise Fault("logs", "CONTAINER_NOT_FOUND", "还没有可读取的容器日志")
+            print("节点已确认容器，正在读取 Docker 日志", file=sys.stderr, flush=True)
+            result = run(["docker", "logs", "--tail", str(payload["tail"]), "spool-" + payload["attempt"]],
+                         "logs", "LOG_READ_FAILED", check=False)
+        except Fault as exc:
+            exc.info["detail"] = redact(exc.info["detail"], secrets)
+            raise
         if result.returncode:
             raise Fault("logs", "LOG_READ_FAILED", "无法读取容器日志", redact(result.stderr, secrets), result.returncode)
+        # docker logs 把容器 stderr 保持在 stderr 通道。
         return {"stdout": redact(result.stdout[-160000:], secrets), "stderr": redact(result.stderr[-160000:], secrets)}
     if action == "checkpoint":
         output = work / "outputs"
